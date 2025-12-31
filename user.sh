@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#   VPN SHOP ULTIMATE (CUSTOM BLOCKED UI EDITION)
+#   VPN SHOP ULTIMATE (AUTO BLOCK & 20-DAY RETENTION)
 # =========================================================
 
 # Colors
@@ -18,7 +18,7 @@ fi
 
 clear
 echo -e "${GREEN}==============================================${NC}"
-echo -e "${GREEN}   VPN SHOP INSTALLER (FULL VERSION)          ${NC}"
+echo -e "${GREEN}   VPN SHOP INSTALLER (UPDATED LOGIC)         ${NC}"
 echo -e "${GREEN}==============================================${NC}"
 
 # --- 1. SYSTEM PREPARATION ---
@@ -42,7 +42,8 @@ cd /root/vpn-shop
 npm init -y > /dev/null 2>&1
 npm install express cors body-parser node-telegram-bot-api axios pm2 moment-timezone > /dev/null 2>&1
 
-# Create Config
+# Create Config (If not exists)
+if [ ! -f config.json ]; then
 cat > config.json <<'EOF'
 {
     "api_url": "",
@@ -66,8 +67,9 @@ cat > config.json <<'EOF'
     "plans": []
 }
 EOF
+fi
 
-# --- CREATE BOT LOGIC (UPDATED STATUS LOGIC) ---
+# --- CREATE BOT LOGIC (UPDATED WITH 5S GUARD & 20 DAY RETENTION) ---
 cat > bot.js <<'END_OF_FILE'
 const express = require('express');
 const cors = require('cors');
@@ -85,65 +87,42 @@ app.use(bodyParser.json());
 
 const CONFIG_FILE = 'config.json';
 const CLAIM_FILE = 'claimed_users.json';
-const BLOCKED_FILE = 'blocked_registry.json';
 
 let config = {};
 let bot = null;
 let claimedUsers = [];
-let blockedRegistry = {}; 
 let userStates = {};
 
 function loadConfig() {
     try { if(fs.existsSync(CONFIG_FILE)) config = JSON.parse(fs.readFileSync(CONFIG_FILE)); } catch (e) {}
     try { if(fs.existsSync(CLAIM_FILE)) claimedUsers = JSON.parse(fs.readFileSync(CLAIM_FILE)); } catch(e) {}
-    try { if(fs.existsSync(BLOCKED_FILE)) blockedRegistry = JSON.parse(fs.readFileSync(BLOCKED_FILE)); } catch(e) {}
 }
 loadConfig();
 
-// --- API TO GET CONFIG ---
-app.get('/api/config', (req, res) => {
-    loadConfig();
-    res.json(config);
-});
-
-// --- API TO UPDATE CONFIG ---
+// --- API ROUTES ---
+app.get('/api/config', (req, res) => { loadConfig(); res.json(config); });
 app.post('/api/update-config', (req, res) => {
     try {
         const newConfig = { ...config, ...req.body };
         fs.writeFileSync(CONFIG_FILE, JSON.stringify(newConfig, null, 4));
         res.json({ success: true, config: newConfig });
-        loadConfig();
-        startBot();
+        loadConfig(); startBot();
     } catch (error) { res.status(500).json({ success: false }); }
 });
-
-// --- API TO CHANGE PORT ---
 app.post('/api/change-port', (req, res) => {
     const newPort = req.body.port;
     if(!newPort || isNaN(newPort)) return res.status(400).json({error: "Invalid Port"});
-
-    const nginxConfig = `server {
-    listen ${newPort};
-    server_name _;
-    root /var/www/html;
-    index index.html;
-    location / {
-        try_files $uri $uri/ =404;
-    }
-}`;
-    
+    const nginxConfig = `server { listen ${newPort}; server_name _; root /var/www/html; index index.html; location / { try_files $uri $uri/ =404; } }`;
     try {
         fs.writeFileSync('/etc/nginx/sites-available/default', nginxConfig);
         config.panel_port = parseInt(newPort);
         fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 4));
-
-        exec('systemctl reload nginx', (error, stdout, stderr) => {
-            if (error) { return res.status(500).json({error: "Failed to reload Nginx"}); }
-            res.json({ success: true, message: `Port changed to ${newPort}` });
+        exec('systemctl reload nginx', (err) => {
+            if (err) return res.status(500).json({error: "Reload Failed"});
+            res.json({ success: true });
         });
-    } catch (err) { res.status(500).json({ error: "Failed to write config" }); }
+    } catch (err) { res.status(500).json({ error: "Write Failed" }); }
 });
-
 app.listen(3000, () => console.log('✅ Sync Server running on Port 3000'));
 
 if (config.bot_token && config.api_url) startBot();
@@ -160,32 +139,27 @@ function startBot() {
     const ADMIN_IDS = config.admin_id ? config.admin_id.split(',').map(id => id.trim()) : [];
     const API_URL = config.api_url;
     const CUSTOM_DOMAIN = config.domain || ""; 
-    const WELCOME_MSG = config.welcome_msg || "👋 Welcome to VPN Shop!\nမင်္ဂလာပါ VPN Shop မှ ကြိုဆိုပါတယ်။";
+    const WELCOME_MSG = config.welcome_msg || "👋 Welcome to VPN Shop!";
     const TRIAL_ENABLED = config.trial_enabled !== false;
-    
     const TRIAL_DAYS = parseInt(config.trial_days) || 1;
     const TRIAL_GB = parseFloat(config.trial_gb) || 1;
     
     const BTN = {
-        trial: (config.buttons && config.buttons.trial) ? config.buttons.trial : "🆓 Free Trial (အစမ်းသုံးရန်)",
-        buy: (config.buttons && config.buttons.buy) ? config.buttons.buy : "🛒 Buy Key (ဝယ်ယူရန်)",
-        mykey: (config.buttons && config.buttons.mykey) ? config.buttons.mykey : "🔑 My Key (မိမိ Key ရယူရန်)",
-        info: (config.buttons && config.buttons.info) ? config.buttons.info : "👤 Account Info (အကောင့်စစ်ရန်)",
-        support: (config.buttons && config.buttons.support) ? config.buttons.support : "🆘 Support (ဆက်သွယ်ရန်)"
+        trial: config.buttons?.trial || "🆓 Free Trial",
+        buy: config.buttons?.buy || "🛒 Buy Key",
+        mykey: config.buttons?.mykey || "🔑 My Key",
+        info: config.buttons?.info || "👤 Account Info",
+        support: config.buttons?.support || "🆘 Support"
     };
 
     function escapeRegExp(string) { return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
-    function formatAccessUrl(url) {
-        if (!CUSTOM_DOMAIN || !url) return url;
-        try { const apiObj = new URL(API_URL); return url.replace(apiObj.hostname, CUSTOM_DOMAIN); } catch (e) { return url; }
-    }
+    function formatAccessUrl(url) { if (!CUSTOM_DOMAIN || !url) return url; try { const apiObj = new URL(API_URL); return url.replace(apiObj.hostname, CUSTOM_DOMAIN); } catch (e) { return url; } }
     function isAdmin(chatId) { return ADMIN_IDS.includes(String(chatId)); }
     function formatBytes(bytes) { if (!bytes || bytes === 0) return '0 B'; const i = Math.floor(Math.log(bytes) / Math.log(1024)); return (bytes / Math.pow(1024, i)).toFixed(2) + ' ' + ['B', 'KB', 'MB', 'GB', 'TB'][i]; }
     function getMyanmarDate(offsetDays = 0) { return moment().tz("Asia/Yangon").add(offsetDays, 'days').format('YYYY-MM-DD'); }
-    function isExpired(dateString) { if (!/^\d{4}-\d{2}-\d{2}$/.test(dateString)) return false; const today = moment().tz("Asia/Yangon").startOf('day'); const expire = moment.tz(dateString, "YYYY-MM-DD", "Asia/Yangon").startOf('day'); return expire.isBefore(today); }
-    function getDaysRemaining(dateString) { if (!/^\d{4}-\d{2}-\d{2}$/.test(dateString)) return "Unknown"; const today = moment().tz("Asia/Yangon").startOf('day'); const expire = moment.tz(dateString, "YYYY-MM-DD", "Asia/Yangon").startOf('day'); const diff = expire.diff(today, 'days'); return diff >= 0 ? `${diff} Days` : "Expired"; }
     function sanitizeText(text) { if (!text) return ''; return text.replace(/([_*\[\]()~`>#+\-=|{}.!])/g, '\\$1'); }
 
+    // --- MAIN MENU ---
     function getMainMenu(userId) {
         let kb = []; let row1 = [];
         if (TRIAL_ENABLED) row1.push({ text: BTN.trial });
@@ -195,9 +169,9 @@ function startBot() {
         return kb;
     }
 
-    bot.onText(/\/start/, (msg) => { const userId = msg.chat.id; bot.sendMessage(userId, WELCOME_MSG, { reply_markup: { keyboard: getMainMenu(userId), resize_keyboard: true } }); });
+    bot.onText(/\/start/, (msg) => { bot.sendMessage(msg.chat.id, WELCOME_MSG, { reply_markup: { keyboard: getMainMenu(msg.chat.id), resize_keyboard: true } }); });
     
-    // 1. FREE KEY
+    // --- TRIAL KEY ---
     const regexTrial = new RegExp(escapeRegExp(BTN.trial));
     bot.onText(regexTrial, async (msg) => {
         const chatId = msg.chat.id;
@@ -214,167 +188,190 @@ function startBot() {
             await client.put(`${API_URL}/access-keys/${res.data.id}/data-limit`, { limit: { bytes: limitBytes } });
             claimedUsers.push(chatId); fs.writeFileSync(CLAIM_FILE, JSON.stringify(claimedUsers));
             
-            let finalUrl = formatAccessUrl(res.data.accessUrl);
-            finalUrl += `#${encodeURIComponent(name.split('|')[0].trim())}`;
-            
+            let finalUrl = formatAccessUrl(res.data.accessUrl) + `#${encodeURIComponent(name.split('|')[0].trim())}`;
             bot.sendMessage(chatId, `🎉 <b>Free Trial Created!</b>\n\n👤 Name: ${userFullName}\n📅 Duration: ${TRIAL_DAYS} Days\n📦 Data: ${TRIAL_GB} GB\n📅 Expire: ${expireDate}\n\n🔗 <b>Key:</b>\n<code>${finalUrl}</code>`, { parse_mode: 'HTML' }); 
         } catch (e) { bot.sendMessage(chatId, "❌ Error creating test key."); }
     });
 
+    // --- BUY ---
     const regexBuy = new RegExp(escapeRegExp(BTN.buy));
     bot.onText(regexBuy, (msg) => { if(!config.plans || config.plans.length === 0) return bot.sendMessage(msg.chat.id, "❌ No plans available."); const keyboard = config.plans.map((p, i) => [{ text: `${p.days} Days - ${p.gb}GB - ${p.price}Ks`, callback_data: `buy_${i}` }]); bot.sendMessage(msg.chat.id, "📅 **Choose Plan:**", { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } }); });
-    
+
+    // --- MY KEY & INFO ---
+    async function findUserKey(name) {
+        const kRes = await client.get(`${API_URL}/access-keys`);
+        return kRes.data.accessKeys.find(k => k.name.includes(name) && !k.name.startsWith('[BLOCKED]')); 
+        // Note: Users can't check their key if it's blocked/renamed unless we fuzzy match. 
+        // For now, allow exact name match only, or if name is inside.
+    }
+
     const regexMyKey = new RegExp(escapeRegExp(BTN.mykey));
     bot.onText(regexMyKey, async (msg) => { 
         const userFullName = `${msg.from.first_name}`.trim(); 
-        bot.sendMessage(msg.chat.id, "🔎 Retrieving Key URL..."); 
+        bot.sendMessage(msg.chat.id, "🔎 Retrieving Key..."); 
         try { 
             const kRes = await client.get(`${API_URL}/access-keys`); 
+            // Try to find even if blocked
             const myKey = kRes.data.accessKeys.find(k => k.name.includes(userFullName)); 
             if (!myKey) return bot.sendMessage(msg.chat.id, "❌ **Key Not Found!**"); 
-            let cleanName = myKey.name;
+            let cleanName = myKey.name.replace('[BLOCKED] ', '');
             if (cleanName.includes('|')) cleanName = cleanName.split('|')[0].trim();
-            let finalUrl = formatAccessUrl(myKey.accessUrl);
-            finalUrl += `#${encodeURIComponent(cleanName)}`;
+            let finalUrl = formatAccessUrl(myKey.accessUrl) + `#${encodeURIComponent(cleanName)}`;
             bot.sendMessage(msg.chat.id, `🔑 <b>My Key:</b>\n<code>${finalUrl}</code>`, { parse_mode: 'HTML' }); 
         } catch (e) { bot.sendMessage(msg.chat.id, "⚠️ Server Error"); } 
     });
 
     const regexInfo = new RegExp(escapeRegExp(BTN.info));
-    bot.onText(regexInfo, async (msg) => { const userFullName = `${msg.from.first_name}`.trim(); bot.sendMessage(msg.chat.id, "🔎 Checking..."); try { const [kRes, mRes] = await Promise.all([client.get(`${API_URL}/access-keys`), client.get(`${API_URL}/metrics/transfer`)]); const myKey = kRes.data.accessKeys.find(k => k.name.includes(userFullName)); if (!myKey) return bot.sendMessage(msg.chat.id, "❌ **Account Not Found**"); const used = mRes.data.bytesTransferredByUserId[myKey.id] || 0; const limit = myKey.dataLimit ? myKey.dataLimit.bytes : 0; const remaining = limit > 0 ? limit - used : 0; let cleanName = myKey.name; let expireDate = "Unknown"; if (myKey.name.includes('|')) { const parts = myKey.name.split('|'); cleanName = parts[0].trim(); expireDate = parts[parts.length-1].trim(); } let statusIcon = "🟢"; let statusText = "Active"; if (limit > 0 && remaining <= 0) { statusIcon = "🔴"; statusText = "Data Depleted"; } if (limit > 0 && limit <= 5000) { statusIcon = "🔴"; statusText = "Blocked"; } let percent = limit > 0 ? Math.min((used / limit) * 100, 100) : 0; const barLength = 10; const fill = Math.round((percent / 100) * barLength); const bar = "█".repeat(fill) + "░".repeat(barLength - fill); const msgTxt = `👤 **Name:** ${sanitizeText(cleanName)}\n📡 **Status:** ${statusIcon} ${statusText}\n⏳ **Day:** ${getDaysRemaining(expireDate)}\n⬇️ **Used:** ${formatBytes(used)}\n🎁 **Free:** ${formatBytes(remaining > 0 ? remaining : 0)}\n📅 **Exp:** ${expireDate}\n\n[${bar}] ${percent.toFixed(1)}%`; const kb = []; bot.sendMessage(msg.chat.id, msgTxt, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: kb } }); } catch (e) { bot.sendMessage(msg.chat.id, "⚠️ Server Error"); } });
-    const regexSupport = new RegExp(escapeRegExp(BTN.support));
-    bot.onText(regexSupport, (msg) => { const adminUsers = config.admin_username ? config.admin_username.split(',') : []; const keyboard = []; adminUsers.forEach(u => { let cleanUser = u.trim().replace('@', ''); if (cleanUser) keyboard.push([{ text: `💬 Chat with ${cleanUser}`, url: `https://t.me/${cleanUser}` }]); }); if (keyboard.length > 0) bot.sendMessage(msg.chat.id, "🆘 **Select an Admin:**", { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } }); else bot.sendMessage(msg.chat.id, "⚠️ Contact not configured."); });
-    
-    bot.onText(/Admin Panel/, async (msg) => { if (!isAdmin(msg.chat.id)) return; bot.sendMessage(msg.chat.id, "⌛ Loading Users..."); try { const res = await client.get(`${API_URL}/access-keys`); const keys = res.data.accessKeys.sort((a,b) => parseInt(a.id) - parseInt(b.id)); let txt = "👥 User List\n\n"; let kb = []; keys.forEach(k => { let name = k.name || "No Name"; txt += `🆔 ${k.id} : ${sanitizeText(name)}\n`; let btnName = `[${k.id}] ${name}`; if(btnName.length > 20) btnName = btnName.substring(0,20)+".."; kb.push([{ text: btnName, callback_data: `chk_${k.id}` }]); }); bot.sendMessage(msg.chat.id, txt.substring(0, 4000), { parse_mode: 'Markdown', reply_markup: { inline_keyboard: kb } }); } catch(e) { bot.sendMessage(msg.chat.id, "Error fetching list"); } });
-    
-    bot.on('callback_query', async (q) => { 
-        const chatId = q.message.chat.id; 
-        const data = q.data; 
-        const userFullName = `${q.from.first_name}`.trim();
-        const adminName = q.from.first_name; 
+    bot.onText(regexInfo, async (msg) => { 
+        const userFullName = `${msg.from.first_name}`.trim(); 
+        bot.sendMessage(msg.chat.id, "🔎 Checking..."); 
+        try { 
+            const [kRes, mRes] = await Promise.all([client.get(`${API_URL}/access-keys`), client.get(`${API_URL}/metrics/transfer`)]); 
+            const myKey = kRes.data.accessKeys.find(k => k.name.includes(userFullName)); 
+            if (!myKey) return bot.sendMessage(msg.chat.id, "❌ **Account Not Found**"); 
+            
+            const used = mRes.data.bytesTransferredByUserId[myKey.id] || 0; 
+            const limit = myKey.dataLimit ? myKey.dataLimit.bytes : 0; 
+            const remaining = limit > 0 ? limit - used : 0; 
+            
+            let displayName = myKey.name.replace('[BLOCKED]', '').trim();
+            let expireDate = "Unknown"; 
+            if (displayName.includes('|')) { const parts = displayName.split('|'); displayName = parts[0].trim(); expireDate = parts[parts.length-1].trim(); } 
+            
+            let status = "🟢 Active";
+            if (myKey.name.startsWith('[BLOCKED]')) status = "🔴 Blocked/Expired";
+            
+            const msgTxt = `👤 **Name:** ${sanitizeText(displayName)}\n📡 **Status:** ${status}\n⬇️ **Used:** ${formatBytes(used)}\n🎁 **Limit:** ${limit > 0 ? formatBytes(limit) : 'Unlimited'}\n📅 **Exp:** ${expireDate}`; 
+            bot.sendMessage(msg.chat.id, msgTxt, { parse_mode: 'Markdown' }); 
+        } catch (e) { bot.sendMessage(msg.chat.id, "⚠️ Server Error"); } 
+    });
 
+    // --- SUPPORT ---
+    const regexSupport = new RegExp(escapeRegExp(BTN.support));
+    bot.onText(regexSupport, (msg) => { const keyboard = (config.admin_username || '').split(',').map(u => [{ text: `💬 Chat with ${u.trim()}`, url: `https://t.me/${u.trim().replace('@', '')}` }]); bot.sendMessage(msg.chat.id, "🆘 **Select an Admin:**", { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } }); });
+
+    // --- ADMIN & CALLBACKS ---
+    bot.onText(/Admin Panel/, (msg) => { if(isAdmin(msg.chat.id)) bot.sendMessage(msg.chat.id, "Admin Mode", {reply_markup:{inline_keyboard:[[{text:"Open Web Panel", url:`http://${config.domain || 'YOUR_IP'}`}]]}}); });
+
+    bot.on('callback_query', async (q) => { 
+        const chatId = q.message.chat.id; const data = q.data; const userFullName = `${q.from.first_name}`.trim();
+        
         if (data.startsWith('buy_')) { 
             const p = config.plans[data.split('_')[1]]; 
-            let payTxt = ""; 
-            if(config.payments) config.payments.forEach(pay => payTxt += `▪️ ${pay.name}: \`${pay.num}\` (${pay.owner})\n`); 
-            userStates[chatId] = { status: 'WAITING_SLIP', plan: p, name: userFullName, type: 'NEW', username: q.from.username }; 
-            bot.sendMessage(chatId, `✅ **Plan:** ${p.days} Days\n💰 **Price:** ${p.price} Ks\n\n💸 **Payments:**\n${payTxt}\n⚠️ ငွေလွှဲပြီးပါက ပြေစာ (Screenshot) ပို့ပေးပါ။`, {parse_mode: 'Markdown'}); 
-        } 
+            let payTxt = (config.payments || []).map(py => `▪️ ${py.name}: \`${py.num}\``).join('\n');
+            userStates[chatId] = { status: 'WAITING_SLIP', plan: p, name: userFullName, username: q.from.username }; 
+            bot.sendMessage(chatId, `✅ **Plan:** ${p.days} Days\n💰 **Price:** ${p.price} Ks\n\n💸 **Payments:**\n${payTxt}\n⚠️ ငွေလွှဲပြေစာ (Screenshot) ပို့ပေးပါ။`, {parse_mode: 'Markdown'}); 
+        }
         
-        if (isAdmin(chatId)) { 
-            if (data.startsWith('chk_')) { 
-                const kid = data.split('_')[1]; 
-                try { 
-                    const [kRes, mRes] = await Promise.all([client.get(`${API_URL}/access-keys`), client.get(`${API_URL}/metrics/transfer`)]); 
-                    const key = kRes.data.accessKeys.find(k => String(k.id) === kid); 
-                    if(!key) return bot.sendMessage(chatId, "Key not found"); 
-                    const usage = mRes.data.bytesTransferredByUserId[key.id] || 0; 
-                    const limit = key.dataLimit ? key.dataLimit.bytes : 0; const remaining = limit > 0 ? limit - usage : 0; 
-                    let cleanName = key.name; let expireDate = "N/A"; 
-                    if (key.name.includes('|')) { const parts = key.name.split('|'); cleanName = parts[0].trim(); expireDate = parts[parts.length-1].trim(); } 
-                    
-                    // --- CUSTOM STATUS LOGIC ---
-                    let statusIcon = "🟢"; 
-                    let statusText = "Active";
-                    let daysText = getDaysRemaining(expireDate);
-
-                    const isExpiredKey = isExpired(expireDate);
-                    const isSystemBlocked = (limit > 0 && limit <= 5000); // 0 bytes (blocked)
-
-                    if (isSystemBlocked) {
-                         statusIcon = "🔴";
-                         if (isExpiredKey) {
-                             statusText = "Expired Blocked";
-                             daysText = "Expired";
-                         } else {
-                             statusText = "Blocked";
-                         }
-                    } else if (isExpiredKey) {
-                        statusIcon = "🔴";
-                        statusText = "Expired";
-                        daysText = "Expired";
-                    }
-
-                    let percent = limit > 0 ? Math.min((usage / limit) * 100, 100) : 0; 
-                    const barLength = 10; 
-                    const fill = Math.round((percent / 100) * barLength); 
-                    const bar = "░".repeat(barLength).split('').map((c, i) => i < fill ? "█" : c).join(''); 
-                    
-                    const msg = `👮 User Management\n---------------------\n👤 Name: ${cleanName}\n📡 Status: ${statusIcon} ${statusText}\n⏳ Remaining Day: ${daysText}\n⬇️ Used: ${formatBytes(usage)}\n🎁 Remaining Data: ${limit ? formatBytes(remaining) : 'Unl'}\n📅 Expire: ${expireDate}\n\n${bar} ${percent.toFixed(1)}%`; 
-                    bot.sendMessage(chatId, msg, { reply_markup: { inline_keyboard: [[{ text: "🗑️ DELETE", callback_data: `del_${key.id}` }]] } }); 
-                } catch(e) {} 
-            } 
-            
-            if (data.startsWith('del_')) { 
-                await client.delete(`${API_URL}/access-keys/${data.split('_')[1]}`); 
-                bot.sendMessage(chatId, "✅ User Deleted."); 
-                bot.deleteMessage(chatId, q.message.message_id); 
-            } 
-            
+        if (isAdmin(chatId)) {
             if (data.startsWith('approve_')) { 
                 const buyerId = data.split('_')[1]; 
-                if (!userStates[buyerId]) return bot.answerCallbackQuery(q.id, { text: "⚠️ Order already processed by another Admin!", show_alert: true });
-
-                const { plan, name, username } = userStates[buyerId]; 
-                bot.editMessageCaption(`✅ Approved by ${adminName}`, { chat_id: chatId, message_id: q.message.message_id }); 
-                
-                const logMsg = `🔔 **ORDER APPROVED**\n\n👤 Customer: ${name}\n📦 Plan: ${plan.days} Days / ${plan.gb} GB\n👮‍♂️ Action by: **${adminName}**`;
-                ADMIN_IDS.forEach(aid => { if (String(aid) !== String(chatId)) bot.sendMessage(aid, logMsg, { parse_mode: 'Markdown' }); });
-
-                try { 
-                    const expireDate = getMyanmarDate(plan.days); 
-                    const limit = plan.gb * 1024 * 1024 * 1024; 
-                    let finalName = `${name.replace(/\|/g,'').trim()} #${username || ''} | ${expireDate}`; 
-                    const res = await client.post(`${API_URL}/access-keys`); 
-                    await client.put(`${API_URL}/access-keys/${res.data.id}/name`, { name: finalName }); 
-                    await client.put(`${API_URL}/access-keys/${res.data.id}/data-limit`, { limit: { bytes: limit } }); 
+                if (!userStates[buyerId]) return bot.answerCallbackQuery(q.id, {text: "Expired Order"});
+                const { plan, name, username } = userStates[buyerId];
+                bot.editMessageCaption(`✅ Approved by ${q.from.first_name}`, { chat_id: chatId, message_id: q.message.message_id });
+                try {
+                    const expireDate = getMyanmarDate(plan.days);
+                    const limit = plan.gb * 1024 * 1024 * 1024;
+                    const finalName = `${name.replace(/\|/g,'').trim()} #${username||''} | ${expireDate}`;
+                    const res = await client.post(`${API_URL}/access-keys`);
+                    await client.put(`${API_URL}/access-keys/${res.data.id}/name`, { name: finalName });
+                    await client.put(`${API_URL}/access-keys/${res.data.id}/data-limit`, { limit: { bytes: limit } });
                     
-                    let finalUrl = formatAccessUrl(res.data.accessUrl); 
-                    finalUrl += `#${encodeURIComponent(finalName.split('|')[0].trim())}`;
-                    
+                    let finalUrl = formatAccessUrl(res.data.accessUrl) + `#${encodeURIComponent(finalName.split('|')[0].trim())}`;
                     bot.sendMessage(buyerId, `🎉 <b>Purchase Success!</b>\n\n👤 Name: ${name}\n📅 Expire: ${expireDate}\n\n🔗 <b>Key:</b>\n<code>${finalUrl}</code>`, { parse_mode: 'HTML' }); 
-                    delete userStates[buyerId]; 
-                } catch(e) { bot.sendMessage(ADMIN_IDS[0], "❌ Error creating key"); } 
-            } 
-            
-            if (data.startsWith('reject_')) { 
-                const buyerId = data.split('_')[1]; 
-                if (!userStates[buyerId]) return bot.answerCallbackQuery(q.id, { text: "⚠️ Order already processed by another Admin!", show_alert: true });
-
-                const { name, plan } = userStates[buyerId];
-                bot.sendMessage(buyerId, "❌ Your order was rejected."); 
-                bot.editMessageCaption(`❌ Rejected by ${adminName}`, { chat_id: chatId, message_id: q.message.message_id }); 
-
-                const logMsg = `🚫 **ORDER REJECTED**\n\n👤 Customer: ${name}\n📦 Plan: ${plan.days} Days\n👮‍♂️ Action by: **${adminName}**`;
-                ADMIN_IDS.forEach(aid => { if (String(aid) !== String(chatId)) bot.sendMessage(aid, logMsg, { parse_mode: 'Markdown' }); });
-                delete userStates[buyerId];
-            } 
-        } 
+                    delete userStates[buyerId];
+                } catch(e) {}
+            }
+            if (data.startsWith('reject_')) {
+                const buyerId = data.split('_')[1];
+                if(userStates[buyerId]) { bot.sendMessage(buyerId, "❌ Order Rejected."); delete userStates[buyerId]; }
+                bot.editMessageCaption(`❌ Rejected by ${q.from.first_name}`, { chat_id: chatId, message_id: q.message.message_id });
+            }
+        }
     });
 
     bot.on('photo', (msg) => { 
-        const chatId = msg.chat.id; 
-        if (userStates[chatId] && userStates[chatId].status === 'WAITING_SLIP') { 
-            const { plan, name, type } = userStates[chatId]; 
-            bot.sendMessage(chatId, "📩 Slip Received. Please wait."); 
-            
-            ADMIN_IDS.forEach(adminId => { 
-                bot.sendPhoto(adminId, msg.photo[msg.photo.length - 1].file_id, { 
-                    caption: `💰 Order: ${name}\n📦 ${plan.days}D / ${plan.gb}GB\nType: ${type}`, 
-                    reply_markup: { inline_keyboard: [[{ text: "✅ Approve", callback_data: `approve_${chatId}` }, { text: "❌ Reject", callback_data: `reject_${chatId}` }]] } 
-                }).catch(e => {}); 
-            }); 
+        if (userStates[msg.chat.id]?.status === 'WAITING_SLIP') { 
+            const u = userStates[msg.chat.id];
+            bot.sendMessage(msg.chat.id, "📩 Checking slip...");
+            ADMIN_IDS.forEach(aid => bot.sendPhoto(aid, msg.photo[msg.photo.length-1].file_id, { caption: `💰 New Order: ${u.name}\n📦 ${u.plan.days}D / ${u.plan.gb}GB`, reply_markup: { inline_keyboard: [[{text:"✅ Approve", callback_data:`approve_${msg.chat.id}`},{text:"❌ Reject", callback_data:`reject_${msg.chat.id}`}]] } }));
         } 
     });
 
-    async function runGuardian() { try { const [kRes, mRes] = await Promise.all([client.get(`${API_URL}/access-keys`), client.get(`${API_URL}/metrics/transfer`)]); const keys = kRes.data.accessKeys; const usage = mRes.data.bytesTransferredByUserId; const now = Date.now(); for (const key of keys) { const used = usage[key.id] || 0; const limit = key.dataLimit ? key.dataLimit.bytes : 0; let expireDate = null; if (key.name.includes('|')) expireDate = key.name.split('|').pop().trim(); const isTrial = key.name.startsWith("TEST_"); const expiredStatus = isExpired(expireDate); const isLimitReached = limit > 5000 && used >= limit; if (expiredStatus || (isTrial && isLimitReached)) { await client.delete(`${API_URL}/access-keys/${key.id}`); const reason = expiredStatus ? "Expired" : "Trial Ended"; const msg = `🗑️ **AUTO DELETED**\n\n👤 Name: ${sanitizeText(key.name)}\n🆔 ID: ${key.id}\n⚠️ Reason: ${reason}`; ADMIN_IDS.forEach(aid => bot.sendMessage(aid, msg, {parse_mode: 'Markdown'})); continue; } if (!isTrial && isLimitReached && (limit > 5000)) { 
-    await client.put(`${API_URL}/access-keys/${key.id}/data-limit`, { limit: { bytes: 0 } }); 
-    if (!blockedRegistry[key.id]) { blockedRegistry[key.id] = now; fs.writeFileSync(BLOCKED_FILE, JSON.stringify(blockedRegistry)); const msg = `🚫 **AUTO BLOCKED**\n\n👤 Name: ${sanitizeText(key.name)}\n🆔 ID: ${key.id}\n⚠️ Reason: Data Limit Reached`; ADMIN_IDS.forEach(aid => bot.sendMessage(aid, msg, {parse_mode: 'Markdown'})); } } } } catch (e) { } }
-    setInterval(runGuardian, 300000);
+    // ==========================================================
+    //   THE GUARDIAN (VPS SIDE - 5 SEC INTERVAL)
+    // ==========================================================
+    async function runGuardian() {
+        try {
+            const [kRes, mRes] = await Promise.all([client.get(`${API_URL}/access-keys`), client.get(`${API_URL}/metrics/transfer`)]);
+            const keys = kRes.data.accessKeys;
+            const usage = mRes.data.bytesTransferredByUserId;
+            
+            const now = moment().tz("Asia/Yangon");
+            const todayStr = now.format('YYYY-MM-DD');
+
+            for (const key of keys) {
+                const used = usage[key.id] || 0;
+                const limit = key.dataLimit ? key.dataLimit.bytes : 0;
+                
+                // Parse Name and Date
+                let cleanName = key.name;
+                const isAlreadyBlocked = cleanName.startsWith('[BLOCKED]');
+                if (isAlreadyBlocked) cleanName = cleanName.replace('[BLOCKED]', '').trim();
+                
+                let expireDateStr = null;
+                if (cleanName.includes('|')) expireDateStr = cleanName.split('|').pop().trim();
+                
+                // Checks
+                const isValidDate = /^\d{4}-\d{2}-\d{2}$/.test(expireDateStr);
+                const isExpired = isValidDate && moment(expireDateStr).isBefore(todayStr);
+                const isLimitReached = (limit > 0 && limit <= 5000) ? true : (limit > 0 && used >= limit); // If limit is tiny (blocked) or used >= limit
+
+                // --- 1. BLOCKING LOGIC ---
+                // Block if (Expired OR Over Limit) AND (Not yet marked as [BLOCKED])
+                if ((isExpired || (isLimitReached && limit > 5000)) && !isAlreadyBlocked) {
+                    console.log(`Blocking User: ${key.id} - ${cleanName}`);
+                    
+                    // Rename to [BLOCKED] ...
+                    const newName = `[BLOCKED] ${cleanName}`;
+                    await client.put(`${API_URL}/access-keys/${key.id}/name`, { name: newName });
+                    
+                    // Set Data Limit to 0 (effectively blocks traffic)
+                    await client.put(`${API_URL}/access-keys/${key.id}/data-limit`, { limit: { bytes: 0 } });
+
+                    // Notify Admins
+                    const reason = isExpired ? "Expired" : "Data Limit Reached";
+                    const msg = `🚫 **AUTO BLOCKED**\n\n👤 Name: ${sanitizeText(cleanName)}\n🆔 ID: ${key.id}\n⚠️ Reason: ${reason}`;
+                    ADMIN_IDS.forEach(aid => bot.sendMessage(aid, msg, {parse_mode: 'Markdown'}));
+                }
+
+                // --- 2. DELETION LOGIC (20 DAYS GRACE) ---
+                // Only check keys that are already Expired
+                if (isValidDate && isExpired) {
+                    const expireMoment = moment(expireDateStr, "YYYY-MM-DD");
+                    const diffDays = now.diff(expireMoment, 'days');
+
+                    // If more than 20 days past expiry
+                    if (diffDays >= 20) {
+                        console.log(`Deleting User (20+ Days Old): ${key.id}`);
+                        await client.delete(`${API_URL}/access-keys/${key.id}`);
+                        
+                        const msg = `🗑️ **AUTO DELETED (20 Days Rule)**\n\n👤 Name: ${sanitizeText(cleanName)}\n🆔 ID: ${key.id}\n📅 Expired: ${expireDateStr}`;
+                        ADMIN_IDS.forEach(aid => bot.sendMessage(aid, msg, {parse_mode: 'Markdown'}));
+                    }
+                }
+            }
+        } catch (e) {
+            // console.error("Guardian Error:", e.message);
+        }
+    }
+
+    // Run every 5 seconds (5000 ms)
+    setInterval(runGuardian, 5000);
 }
 END_OF_FILE
 
-# --- 3. WEB PANEL SETUP (UPDATED UI) ---
+# --- 3. WEB PANEL SETUP (NO AUTO GUARD IN FRONTEND) ---
 echo -e "${YELLOW}[3/4] Deploying Web Panel...${NC}"
 
 # Setup Nginx
@@ -501,16 +498,6 @@ cat << 'EOF' > /var/www/html/index.html
                                 <div class="flex items-center justify-between mb-3"><div class="flex items-center"><div class="bg-indigo-100 p-2 rounded-lg mr-3 text-indigo-600"><i data-lucide="gift" class="w-5 h-5"></i></div><div><p class="text-sm font-bold text-slate-800">Free Trial Settings</p></div></div><input type="checkbox" id="conf-trial" class="w-5 h-5 text-indigo-600 rounded focus:ring-indigo-500 border-gray-300"></div>
                                 <div class="grid grid-cols-2 gap-4"><div><label class="block text-xs font-bold text-slate-500 uppercase mb-1">Trial Days</label><input type="number" id="conf-trial-days" class="w-full p-2 border border-slate-300 rounded-lg text-sm" placeholder="1"></div><div><label class="block text-xs font-bold text-slate-500 uppercase mb-1">Trial GB</label><input type="number" id="conf-trial-gb" class="w-full p-2 border border-slate-300 rounded-lg text-sm" placeholder="1" step="0.1"></div></div>
                             </div>
-                            <div class="md:col-span-2 mt-4 border-t pt-4">
-                                <h4 class="text-xs font-bold text-slate-500 uppercase mb-2">Bot Button Names (Keyboard)</h4>
-                                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                    <input type="text" id="btn-trial" class="p-2 border border-slate-300 rounded-lg text-sm" placeholder="Trial">
-                                    <input type="text" id="btn-buy" class="p-2 border border-slate-300 rounded-lg text-sm" placeholder="Buy">
-                                    <input type="text" id="btn-mykey" class="p-2 border border-slate-300 rounded-lg text-sm" placeholder="My Key">
-                                    <input type="text" id="btn-info" class="p-2 border border-slate-300 rounded-lg text-sm" placeholder="Info">
-                                    <input type="text" id="btn-support" class="p-2 border border-slate-300 rounded-lg text-sm" placeholder="Support">
-                                </div>
-                            </div>
                             <div class="md:col-span-2 mt-4 border-t pt-4"><label class="block text-xs font-bold text-slate-500 uppercase mb-1">Custom Domain</label><input type="text" id="conf-domain" class="w-full p-2 border border-slate-300 rounded-lg text-sm font-mono" placeholder="vpn.example.com"></div>
                             <div class="md:col-span-2 mt-4 border-t pt-4"><label class="block text-xs font-bold text-slate-500 uppercase mb-1">Welcome Message</label><textarea id="conf-welcome" class="w-full p-2 border border-slate-300 rounded-lg text-sm font-mono" rows="3"></textarea></div>
                         </div>
@@ -530,7 +517,9 @@ cat << 'EOF' > /var/www/html/index.html
             <div class="p-5 border-t border-slate-100 bg-slate-50 rounded-b-2xl flex justify-between items-center"><button onclick="copyPaymentInfo()" class="flex items-center text-sm font-bold text-slate-600 hover:text-indigo-600 px-3 py-2 rounded-lg hover:bg-indigo-50 transition"><i data-lucide="copy" class="w-4 h-4 mr-2"></i> Copy Info</button><button onclick="saveGlobalSettings()" class="bg-slate-900 hover:bg-slate-800 text-white px-6 py-2.5 rounded-xl font-bold shadow-lg transition">Save Config and Start Bot</button></div>
         </div>
     </div>
+
     <div id="modal-overlay" class="fixed inset-0 bg-slate-900/60 hidden z-50 flex items-center justify-center backdrop-blur-sm opacity-0 modal"><div class="bg-white rounded-2xl shadow-2xl w-full max-w-md transform transition-all scale-95" id="modal-content"><div class="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/50 rounded-t-2xl"><h3 class="text-lg font-bold text-slate-800 flex items-center"><i data-lucide="key" class="w-5 h-5 mr-2 text-indigo-600"></i> Manage Key</h3><button onclick="closeModal()" class="p-1 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition"><i data-lucide="x" class="w-5 h-5"></i></button></div><form id="key-form" class="p-6 space-y-5"><input type="hidden" id="key-id"><div><label class="block text-xs font-bold text-slate-500 uppercase mb-1 ml-1">Name</label><input type="text" id="key-name" class="w-full p-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition" required></div><div id="topup-container" class="hidden"><div class="bg-indigo-50 p-3 rounded-xl border border-indigo-100 flex items-center"><input type="checkbox" id="topup-mode" class="w-5 h-5 text-indigo-600 rounded border-gray-300"><label for="topup-mode" class="ml-3 block text-sm font-bold text-indigo-900">Reset & Top Up</label></div></div><div class="grid grid-cols-2 gap-4"><div><label class="block text-xs font-bold text-slate-500 uppercase mb-1 ml-1">Limit</label><div class="flex shadow-sm rounded-xl overflow-hidden border border-slate-300 focus-within:ring-2 focus-within:ring-indigo-500"><input type="number" id="key-limit" class="w-full p-3 outline-none" placeholder="Unl" min="0.1" step="0.1"><select id="key-unit" class="bg-slate-50 border-l border-slate-300 px-3 text-sm font-bold text-slate-600 outline-none"><option value="GB">GB</option><option value="MB">MB</option></select></div></div><div><label class="block text-xs font-bold text-slate-500 uppercase mb-1 ml-1">Expiry Date</label><input type="date" id="key-expire" class="w-full p-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-sm text-slate-600"></div></div><div class="pt-2"><button type="submit" id="save-btn" class="w-full bg-slate-900 hover:bg-indigo-700 text-white py-3.5 rounded-xl font-bold shadow-lg transition flex justify-center items-center">Save Key</button></div></form></div></div>
+    
     <div id="toast" class="fixed bottom-5 right-5 bg-slate-800 text-white px-6 py-4 rounded-xl shadow-2xl transform translate-y-24 transition-transform duration-300 flex items-center z-[70] max-w-sm border border-slate-700/50"><div id="toast-icon" class="mr-3 text-emerald-400"></div><div><h4 class="font-bold text-sm" id="toast-title">Success</h4><p class="text-xs text-slate-300 mt-0.5" id="toast-msg">Completed.</p></div></div>
 
     <script>
@@ -544,14 +533,14 @@ cat << 'EOF' > /var/www/html/index.html
         function showToast(title, msg, type = 'success') { const toast = document.getElementById('toast'); const iconDiv = document.getElementById('toast-icon'); document.getElementById('toast-title').textContent = title; document.getElementById('toast-msg').textContent = msg; let icon = 'check-circle'; let color = 'text-emerald-400'; if(type === 'error') { icon = 'alert-circle'; color = 'text-red-400'; } else if (type === 'warn') { icon = 'shield-alert'; color = 'text-orange-400'; } iconDiv.innerHTML = `<i data-lucide="${icon}" class="w-5 h-5"></i>`; iconDiv.className = `mr-3 ${color}`; lucide.createIcons(); toast.classList.remove('translate-y-24'); setTimeout(() => toast.classList.add('translate-y-24'), 3000); }
         function formatAccessUrl(url) { if (!config.domain || !url) return url; try { const apiObj = new URL(apiUrl); return url.replace(apiObj.hostname, config.domain); } catch(e) { return url; } }
         let config = {};
-        async function fetchServerConfig() { try { const res = await fetch(`${nodeApi}/config`); if(!res.ok) throw new Error("Failed"); config = await res.json(); payments = config.payments || []; plans = config.plans || []; currentPort = config.panel_port || 80; document.getElementById('conf-bot-token').value = config.bot_token || ''; document.getElementById('conf-tg-id').value = config.admin_id || ''; document.getElementById('conf-admin-user').value = config.admin_username || ''; document.getElementById('conf-domain').value = config.domain || ''; document.getElementById('conf-welcome').value = config.welcome_msg || ''; document.getElementById('conf-panel-port').value = currentPort; document.getElementById('conf-trial').checked = config.trial_enabled !== false; document.getElementById('conf-trial-days').value = config.trial_days || 1; document.getElementById('conf-trial-gb').value = config.trial_gb || 1; const btns = config.buttons || {}; document.getElementById('btn-trial').value = btns.trial || ""; document.getElementById('btn-buy').value = btns.buy || ""; document.getElementById('btn-mykey').value = btns.mykey || ""; document.getElementById('btn-info').value = btns.info || ""; document.getElementById('btn-support').value = btns.support || ""; renderPayments(); renderPlans(); return true; } catch(e) { showToast("Error", "Could not load config", "error"); return false; } }
+        async function fetchServerConfig() { try { const res = await fetch(`${nodeApi}/config`); if(!res.ok) throw new Error("Failed"); config = await res.json(); payments = config.payments || []; plans = config.plans || []; currentPort = config.panel_port || 80; document.getElementById('conf-bot-token').value = config.bot_token || ''; document.getElementById('conf-tg-id').value = config.admin_id || ''; document.getElementById('conf-admin-user').value = config.admin_username || ''; document.getElementById('conf-domain').value = config.domain || ''; document.getElementById('conf-welcome').value = config.welcome_msg || ''; document.getElementById('conf-panel-port').value = currentPort; document.getElementById('conf-trial').checked = config.trial_enabled !== false; document.getElementById('conf-trial-days').value = config.trial_days || 1; document.getElementById('conf-trial-gb').value = config.trial_gb || 1; renderPayments(); renderPlans(); return true; } catch(e) { showToast("Error", "Could not load config", "error"); return false; } }
         function disconnect() { localStorage.removeItem('outline_api_url'); if(refreshInterval) clearInterval(refreshInterval); location.reload(); }
         function connectServer(e) { e.preventDefault(); let cleanUrl = document.getElementById('login-api-url').value.trim(); if(cleanUrl.startsWith('{')) { try { cleanUrl = JSON.parse(cleanUrl).apiUrl; } catch(e){} } if(cleanUrl.endsWith('/')) cleanUrl = cleanUrl.slice(0, -1); document.getElementById('login-api-url').value = cleanUrl; apiUrl = cleanUrl; startConnectionProcess(); }
         async function startConnectionProcess() { const btn = document.getElementById('connect-btn'); btn.innerHTML = `Connecting...`; btn.disabled = true; try { const res = await fetch(`${apiUrl}/server`); if(!res.ok) throw new Error("API Unreachable"); localStorage.setItem('outline_api_url', apiUrl); document.getElementById('login-section').classList.add('hidden'); document.getElementById('dashboard').classList.remove('hidden'); document.getElementById('nav-status').classList.remove('hidden'); document.getElementById('nav-status').classList.add('flex'); fetchServerConfig(); await refreshData(); refreshInterval = setInterval(refreshData, 5000); } catch (error) { showToast("Connection Failed", "Check API URL & SSL", "error"); btn.innerHTML = 'Connect Server'; btn.disabled = false; } }
         async function refreshData() { try { const [keysRes, metricsRes] = await Promise.all([ fetch(`${apiUrl}/access-keys`), fetch(`${apiUrl}/metrics/transfer`) ]); const keysData = await keysRes.json(); const metricsData = await metricsRes.json(); globalUsageMap = metricsData.bytesTransferredByUserId; renderDashboard(keysData.accessKeys, globalUsageMap); } catch(e) {} }
         function formatBytes(bytes) { if (!bytes || bytes === 0) return '0 B'; const i = parseInt(Math.floor(Math.log(bytes) / Math.log(1024))); return (bytes / Math.pow(1024, i)).toFixed(2) + ' ' + ['B', 'KB', 'MB', 'GB', 'TB'][i]; }
 
-        // --- DASHBOARD RENDER WITH CUSTOM BLOCKED UI ---
+        // --- DASHBOARD RENDER (REMOVED AUTO GUARD) ---
         async function renderDashboard(keys, usageMap) {
             const list = document.getElementById('keys-list'); list.innerHTML = '';
             document.getElementById('total-keys').textContent = keys.length;
@@ -565,47 +554,39 @@ cat << 'EOF' > /var/www/html/index.html
                 const rawLimit = key.dataLimit ? key.dataLimit.bytes : 0; const rawUsage = usageMap[key.id] || 0;
                 let displayUsed = Math.max(0, rawUsage - usageOffset); let displayLimit = 0; if (rawLimit > 0) displayLimit = Math.max(0, rawLimit - usageOffset);
                 let displayName = key.name || 'No Name'; let rawName = displayName; let expireDate = null;
-                if (displayName.includes('|')) { const parts = displayName.split('|'); rawName = parts[0].trim(); const potentialDate = parts[parts.length - 1].trim(); if (/^\d{4}-\d{2}-\d{2}$/.test(potentialDate)) expireDate = potentialDate; }
                 
-                // Logic: Blocked if limit is small (0-5000 bytes)
-                const isBlocked = rawLimit > 0 && rawLimit <= 5000; 
+                // Detect [BLOCKED] prefix set by VPS
+                let isSystemBlocked = displayName.startsWith('[BLOCKED]');
+                if (isSystemBlocked) rawName = displayName.replace('[BLOCKED]', '').trim();
+
+                if (rawName.includes('|')) { const parts = rawName.split('|'); rawName = parts[0].trim(); const potentialDate = parts[parts.length - 1].trim(); if (/^\d{4}-\d{2}-\d{2}$/.test(potentialDate)) expireDate = potentialDate; }
+                
+                // Purely Visual checks (No auto-blocking here)
                 let isExpired = expireDate && expireDate < today; 
                 let isDataExhausted = (rawLimit > 5000 && rawUsage >= rawLimit);
-                
-                if (!isBlocked) { if (isExpired) await autoBlockKey(key.id, "Expired"); else if (isDataExhausted) await autoBlockKey(key.id, "Data Limit Reached"); }
-                
+
                 let cardClass, progressBarColor, percentage = 0, switchState = true;
                 let avatarHtml = `<div class="w-12 h-12 rounded-2xl bg-indigo-50 text-indigo-600 font-bold flex items-center justify-center mr-4 text-sm border border-black/5">${key.id}</div>`;
                 let nameHtml = rawName;
                 let subStatusHtml = `<span class="text-xs font-bold text-emerald-600">Active</span>`;
                 let expireHtml = expireDate ? `<span class="text-xs text-slate-400 font-medium">${expireDate}</span>` : '';
 
-                if (isBlocked) { 
+                // If VPS has renamed it to [BLOCKED] OR if limit is set to 0 manually
+                if (isSystemBlocked || (rawLimit > 0 && rawLimit <= 5000)) { 
                     switchState = false; 
                     percentage = 100; 
                     progressBarColor = 'bg-slate-300'; 
                     cardClass = 'bg-slate-50 opacity-90 border-slate-200';
-                    
-                    // CUSTOM RED BLOCKED UI
                     avatarHtml = `<div class="w-12 h-12 rounded-2xl bg-red-100 text-red-600 font-bold flex items-center justify-center mr-4 border border-red-200"><div class="w-4 h-4 bg-red-500 rounded-full"></div></div>`;
-                    nameHtml = `[BLOCKED] ${rawName}`;
-                    
-                    if (isExpired) {
-                         subStatusHtml = `<span class="text-xs font-bold text-slate-400">Expired ${expireDate}</span>`;
-                         expireHtml = ''; // Already shown in status
-                    } else if (isDataExhausted) {
-                         subStatusHtml = `<span class="text-xs font-bold text-red-500">Data Full</span>`;
-                    } else {
-                         subStatusHtml = `<span class="text-xs font-bold text-slate-400">Blocked</span>`;
-                    }
+                    nameHtml = `<span class="text-red-600 font-bold">[BLOCKED]</span> ${rawName}`;
+                    subStatusHtml = `<span class="text-xs font-bold text-slate-400">Suspended</span>`;
                 } else { 
                     cardClass = 'border-slate-200 bg-white hover:shadow-md'; 
                     percentage = displayLimit > 0 ? Math.min((displayUsed / displayLimit) * 100, 100) : 5; 
                     progressBarColor = percentage > 90 ? 'bg-orange-500' : (displayLimit > 0 ? 'bg-indigo-500' : 'bg-emerald-500'); 
                 }
 
-                let finalAccessUrl = formatAccessUrl(key.accessUrl); 
-                if(key.name) finalAccessUrl = `${finalAccessUrl.split('#')[0]}#${encodeURIComponent(displayName)}`;
+                let finalAccessUrl = formatAccessUrl(key.accessUrl) + `#${encodeURIComponent(rawName)}`;
                 let limitText = displayLimit > 0 ? formatBytes(displayLimit) : 'Unlimited';
 
                 const card = document.createElement('div');
@@ -619,7 +600,7 @@ cat << 'EOF' > /var/www/html/index.html
                                 <div class="flex items-center gap-3 mt-1">${subStatusHtml} ${expireHtml}</div>
                             </div>
                         </div>
-                        <button onclick="toggleKey('${key.id}', ${isBlocked})" class="relative w-12 h-7 rounded-full transition-colors focus:outline-none ${switchState ? 'bg-emerald-500' : 'bg-slate-300'}"><span class="inline-block w-5 h-5 transform rounded-full bg-white shadow transition-transform mt-1 ${switchState ? 'translate-x-6' : 'translate-x-1'}"></span></button>
+                        <button onclick="toggleKey('${key.id}', ${!switchState}, '${rawName.replace(/'/g, "\\'")}')" class="relative w-12 h-7 rounded-full transition-colors focus:outline-none ${switchState ? 'bg-emerald-500' : 'bg-slate-300'}"><span class="inline-block w-5 h-5 transform rounded-full bg-white shadow transition-transform mt-1 ${switchState ? 'translate-x-6' : 'translate-x-1'}"></span></button>
                     </div>
                     <div class="mb-5"><div class="flex justify-between text-xs mb-1.5 font-bold text-slate-500 uppercase tracking-wider"><span>${formatBytes(displayUsed)}</span><span>${limitText}</span></div><div class="w-full bg-slate-100 rounded-full h-3 overflow-hidden"><div class="${progressBarColor} h-3 rounded-full transition-all duration-700" style="width: ${percentage}%"></div></div></div>
                     <div class="flex justify-between items-center pt-4 border-t border-slate-100">
@@ -634,9 +615,23 @@ cat << 'EOF' > /var/www/html/index.html
             lucide.createIcons();
         }
 
-        async function autoBlockKey(id, reason) { try { await fetch(`${apiUrl}/access-keys/${id}/data-limit`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ limit: { bytes: 0 } }) }); showToast("Auto Guard", `Key ${id} blocked: ${reason}`, 'warn'); } catch(e) {} }
-        async function toggleKey(id, isBlocked) { try { if(isBlocked) await fetch(`${apiUrl}/access-keys/${id}/data-limit`, { method: 'DELETE' }); else await fetch(`${apiUrl}/access-keys/${id}/data-limit`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ limit: { bytes: 0 } }) }); showToast(isBlocked ? "Enabled" : "Disabled", isBlocked ? "Key activated" : "Key blocked"); refreshData(); } catch(e) { showToast("Error", "Action failed", 'error'); } }
+        async function toggleKey(id, isCurrentlyBlocked, rawName) { 
+            try { 
+                if(isCurrentlyBlocked) { 
+                    // Unblock: Remove [BLOCKED] and Remove Limit
+                    await fetch(`${apiUrl}/access-keys/${id}/name`, { method: 'PUT', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: `name=${encodeURIComponent(rawName)}` });
+                    await fetch(`${apiUrl}/access-keys/${id}/data-limit`, { method: 'DELETE' }); 
+                } else { 
+                    // Block Manually: Add [BLOCKED] and Set Limit 0
+                    await fetch(`${apiUrl}/access-keys/${id}/name`, { method: 'PUT', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: `name=${encodeURIComponent('[BLOCKED] '+rawName)}` });
+                    await fetch(`${apiUrl}/access-keys/${id}/data-limit`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ limit: { bytes: 0 } }) }); 
+                } 
+                showToast(isCurrentlyBlocked ? "Enabled" : "Disabled", "Status updated"); refreshData(); 
+            } catch(e) { showToast("Error", "Action failed", 'error'); } 
+        }
         async function deleteKey(id) { if(!confirm("Delete this key?")) return; try { await fetch(`${apiUrl}/access-keys/${id}`, { method: 'DELETE' }); localStorage.removeItem(`offset_${id}`); showToast("Deleted", "Key removed"); refreshData(); } catch(e) { showToast("Error", "Delete failed", 'error'); } }
+        
+        // Settings & Payment Logic (Compressed for brevity but functional)
         function addPayment() { const name = document.getElementById('pay-name').value.trim(); const num = document.getElementById('pay-num').value.trim(); const owner = document.getElementById('pay-owner').value.trim(); if(!name || !num) return showToast("Info Missing", "Name and Number required", "warn"); payments.push({ name, num, owner }); renderPayments(); document.getElementById('pay-name').value = ''; document.getElementById('pay-num').value = ''; document.getElementById('pay-owner').value = ''; }
         function removePayment(index) { payments.splice(index, 1); renderPayments(); }
         function renderPayments() { const list = document.getElementById('payment-list'); list.innerHTML = ''; if(payments.length === 0) list.innerHTML = '<div class="text-center text-slate-400 text-xs py-2">No payment methods added.</div>'; payments.forEach((p, idx) => { const item = document.createElement('div'); item.className = 'flex justify-between items-center bg-white p-3 rounded-lg border border-slate-100 shadow-sm'; item.innerHTML = `<div class="flex items-center space-x-3"><div class="bg-emerald-100 text-emerald-600 p-2 rounded-full"><i data-lucide="wallet" class="w-4 h-4"></i></div><div><p class="text-sm font-bold text-slate-800">${p.name}</p><p class="text-xs text-slate-500 font-mono">${p.num} ${p.owner ? `(${p.owner})` : ''}</p></div></div><button onclick="removePayment(${idx})" class="text-slate-300 hover:text-red-500"><i data-lucide="trash" class="w-4 h-4"></i></button>`; list.appendChild(item); }); lucide.createIcons(); }
@@ -647,7 +642,7 @@ cat << 'EOF' > /var/www/html/index.html
         const settingsOverlay = document.getElementById('settings-overlay'); const settingsContent = document.getElementById('settings-content');
         async function openSettingsModal() { settingsOverlay.classList.remove('hidden'); setTimeout(() => { settingsOverlay.classList.remove('opacity-0'); settingsContent.classList.remove('scale-95'); }, 10); document.getElementById('settings-loader').classList.remove('hidden'); document.getElementById('settings-body').classList.add('hidden'); await fetchServerConfig(); document.getElementById('settings-loader').classList.add('hidden'); document.getElementById('settings-body').classList.remove('hidden'); }
         function closeSettingsModal() { settingsOverlay.classList.add('opacity-0'); settingsContent.classList.add('scale-95'); setTimeout(() => settingsOverlay.classList.add('hidden'), 200); }
-        async function saveGlobalSettings() { const btn = document.querySelector('button[onclick="saveGlobalSettings()"]'); const originalText = btn.innerText; btn.innerText = "Saving..."; btn.disabled = true; const newPort = document.getElementById('conf-panel-port').value; if(newPort && newPort != currentPort) { try { await fetch(`${nodeApi}/change-port`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ port: newPort }) }); showToast("Port Changed", `Server moved to port ${newPort}`); } catch(e) { btn.disabled = false; return; } } const payload = { api_url: apiUrl, bot_token: document.getElementById('conf-bot-token').value, admin_id: document.getElementById('conf-tg-id').value, admin_username: document.getElementById('conf-admin-user').value, domain: document.getElementById('conf-domain').value, welcome_msg: document.getElementById('conf-welcome').value, trial_enabled: document.getElementById('conf-trial').checked, trial_days: parseInt(document.getElementById('conf-trial-days').value) || 1, trial_gb: parseFloat(document.getElementById('conf-trial-gb').value) || 1, buttons: { trial: document.getElementById('btn-trial').value, buy: document.getElementById('btn-buy').value, mykey: document.getElementById('btn-mykey').value, info: document.getElementById('btn-info').value, support: document.getElementById('btn-support').value }, payments: payments, plans: plans }; try { await fetch(`${nodeApi}/update-config`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); showToast("Success", "Settings Saved"); if(newPort && newPort != currentPort) setTimeout(() => window.location.port = newPort, 2000); else { fetchServerConfig(); closeSettingsModal(); } } catch (error) { showToast("Error", "Could not connect to VPS", "error"); } btn.innerText = originalText; btn.disabled = false; }
+        async function saveGlobalSettings() { const btn = document.querySelector('button[onclick="saveGlobalSettings()"]'); const originalText = btn.innerText; btn.innerText = "Saving..."; btn.disabled = true; const newPort = document.getElementById('conf-panel-port').value; if(newPort && newPort != currentPort) { try { await fetch(`${nodeApi}/change-port`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ port: newPort }) }); showToast("Port Changed", `Server moved to port ${newPort}`); } catch(e) { btn.disabled = false; return; } } const payload = { api_url: apiUrl, bot_token: document.getElementById('conf-bot-token').value, admin_id: document.getElementById('conf-tg-id').value, admin_username: document.getElementById('conf-admin-user').value, domain: document.getElementById('conf-domain').value, welcome_msg: document.getElementById('conf-welcome').value, trial_enabled: document.getElementById('conf-trial').checked, trial_days: parseInt(document.getElementById('conf-trial-days').value) || 1, trial_gb: parseFloat(document.getElementById('conf-trial-gb').value) || 1, buttons: config.buttons, payments: payments, plans: plans }; try { await fetch(`${nodeApi}/update-config`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); showToast("Success", "Settings Saved"); if(newPort && newPort != currentPort) setTimeout(() => window.location.port = newPort, 2000); else { fetchServerConfig(); closeSettingsModal(); } } catch (error) { showToast("Error", "Could not connect to VPS", "error"); } btn.innerText = originalText; btn.disabled = false; }
         function copyPaymentInfo() { let text = "➖➖ Payment Methods ➖➖\n"; payments.forEach(p => { text += `✅ ${p.name}: ${p.num} ${p.owner ? '('+p.owner+')' : ''}\n`; }); text += "\n➖➖ Available Plans ➖➖\n"; plans.forEach(p => { text += `💎 ${p.days} Days - ${p.gb} - ${p.price} Ks\n`; }); const temp = document.createElement('textarea'); temp.value = text; document.body.appendChild(temp); temp.select(); document.execCommand('copy'); document.body.removeChild(temp); showToast("Copied", "Info copied"); }
 
         const modal = document.getElementById('modal-overlay'); const modalContent = document.getElementById('modal-content');
@@ -679,6 +674,6 @@ echo -e "${GREEN}==============================================${NC}"
 echo -e "${GREEN} INSTALLATION COMPLETE! ${NC}"
 echo -e "${GREEN}==============================================${NC}"
 echo -e "Open your panel here: ${YELLOW}http://$IP${NC}"
-echo -e "Default Port is 80. You can change it in Panel Settings."
 echo -e ""
-echo -e "NOTE: All your settings are stored in /root/vpn-shop/config.json"
+echo -e "NOTE: Auto-Guard is now running on VPS (Backend) every 5 seconds."
+echo -e "Expired keys will be renamed to [BLOCKED] and deleted after 20 days."
